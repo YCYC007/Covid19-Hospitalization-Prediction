@@ -1,0 +1,197 @@
+---
+title: "thesis_analysis"
+author: "Yizhou Chen"
+date: "3/7/2021"
+output: pdf_document
+---
+
+## R Markdown
+
+Loading packages
+```{r}
+library(data.table)
+library(dplyr)
+library(tidyverse)
+library(magrittr)
+library(ggplot2)
+library(ggcorrplot)
+library(mice)
+library(naniar)
+library(VIM)
+library(caret)
+library(ggpubr)
+```
+
+
+```{r cars}
+data <- fread("F:/Google Drive/Thesis_II/all-states-history.csv")
+```
+
+choose the most hospitalization ten states on 8/31/2020
+```{r pressure, echo=FALSE}
+top_ten <- data[data$date == "2020-8-31"]
+
+#choose the top ten states
+top_ten %>%
+  arrange(desc(hospitalizedCumulative))
+
+#keep only these ten states
+top_ten_state <- c("NY", "FL", "GA", "NJ", "AZ", "MD", "AL", "OH", "MA", "CT")
+data_top <- subset(data, data$state == "NY" | data$state == "FL" | 
+                     data$state == "GA" | data$state == "NJ" | 
+                     data$state == "AZ"
+                   )
+
+data_top[data_top$date == "2020-07-16"]
+```
+
+```{r}
+#subsetting the needed variables
+data_top_1 <- data_top %>%
+  select(date, state, death, hospitalizedCumulative, totalTestResults, recovered, positiveCasesViral)
+
+#clean the dataset
+data_top_1$state <- as.factor(data_top_1$state)
+data_top_1$date <- as.POSIXct(data_top_1$date, format="%Y-%m-%d")
+
+#visualize the missing data
+gg_miss_var(data_top_1, show_pct = TRUE)
+
+#The missing level in recover is too high (more than 50%), so we want to omit that variable
+data_top_1 <- subset(data_top_1, select = c(1, 2, 3, 4, 5, 7))
+
+#since our response variable is hospitailized, we want to omit all the missings in hospitalized
+data_omit <- subset(data_top_1, select = c(4))
+data_top_1 <- data_top_1[complete.cases(data_omit), ]
+
+#visualize missing again after cleaning
+gg_miss_var(data_top_1, show_pct = TRUE)
+summary(data_top_1)
+```
+
+
+```{r}
+#using KNN to do imputation on death and positiveCasesViral
+data_imputed <- kNN(data_top_1, variable = c("death", "positiveCasesViral"), k = 58)#using square root of total observations as k level
+summary(data_imputed)
+```
+
+```{r}
+#correlation plot
+
+sub_cor <- subset(data_imputed, select = c(3, 4, 5, 6))
+
+#convert date into days count
+corr <- round(cor(sub_cor), 2)
+              
+ggcorrplot(corr, hc.order = TRUE, type = "lower", lab = TRUE)
+```
+
+
+```{r}
+#scatter plot between hospitalized and each feature
+
+#hospitalized vs. date
+ggplot(data_imputed, aes(x = date, y = hospitalizedCumulative, color = state)) + 
+  scale_x_datetime(date_labels = "%Y-%m", date_breaks  ="1 month") +
+  # geom_point() 
+  # geom_smooth(method = lm, se=FALSE)
+  geom_line()
+
+#hospitalized vs. death
+ggplot(data_imputed, aes(x = death, y = hospitalizedCumulative, color = state)) + 
+  # geom_point() 
+  geom_line()
+
+#hospitalized vs. totaltests
+ggplot(data_imputed, aes(x = totalTestResults, y = hospitalizedCumulative, color = state)) + 
+  # geom_point() 
+  geom_line()
+
+#hospitalized vs. positive cases
+ggplot(data_imputed, aes(x = positiveCasesViral, y = hospitalizedCumulative, color = state)) + 
+  # geom_point() 
+  geom_line()
+
+```
+
+Separate dataset into training and test dataset by time frame 50 to 50
+```{r}
+data_imputed <- data_imputed[order(data_imputed$date)]
+
+train_date <- as.POSIXct("2020-03-04") + difftime("2021-03-07", "2020-03-04", units = "days") / 2
+train_data <- subset(data_imputed, data_imputed$date >= "2020-03-03" & data_imputed$date <= train_date)
+test_data <- subset(data_imputed, data_imputed$date > train_date & data_imputed$date <= "2021-03-07")
+```
+
+train the model by use 10 fold cross validation
+```{r}
+fold <- trainControl(method = "cv", number = 10)
+model <- train(hospitalizedCumulative ~ date + state + death + totalTestResults + positiveCasesViral, 
+               data = train_data, method = "lm", trControl = fold)
+summary (model)
+```
+
+make prediction by using the trained model on testing dataset
+```{r}
+test_data$prediction <- predict(model, newdata = test_data)
+```
+
+visualization
+```{r}
+NY_test <- test_data[test_data$state == "NY"]
+GA_test <- test_data[test_data$state == "GA"]
+FL_test <- test_data[test_data$state == "FL"]
+NJ_test <- test_data[test_data$state == "NJ"]
+AZ_test <- test_data[test_data$state == "AZ"]
+
+
+NY <- ggplot() + 
+  geom_line(data = NY_test, aes(x = date, y = hospitalizedCumulative), colour = "blue") +
+  # geom_line(data = NY_test, aes(x = date, y = prediction), color = "red") +
+  geom_line(data = NY_test, aes(x = date, y = prediction), colour="red") +
+  scale_x_datetime(date_labels = "%Y-%m", date_breaks  ="1 month") +
+  xlab('Dates') +
+  ylab('Hospitalized')
+
+GA <- ggplot() + 
+  geom_line(data = GA_test, aes(x = date, y = hospitalizedCumulative), color = "blue") +
+  geom_line(data = GA_test, aes(x = date, y = prediction), color = "red") +
+  # geom_smooth(data = GA_test, aes(x = date, y = prediction), method = lm , color="red", fill="#69b3a2", se=TRUE) +
+  scale_x_datetime(date_labels = "%Y-%m", date_breaks  ="1 month") +
+  xlab('Dates') +
+  ylab('Hospitalized')
+
+FL <- ggplot() + 
+  geom_line(data = FL_test, aes(x = date, y = hospitalizedCumulative), color = "blue") +
+  geom_line(data = FL_test, aes(x = date, y = prediction), color = "red") +
+  # geom_smooth(data = FL_test, aes(x = date, y = prediction), method = lm , color="red", fill="#69b3a2", se=TRUE) +
+  scale_x_datetime(date_labels = "%Y-%m", date_breaks  ="1 month") +
+  xlab('Dates') +
+  ylab('Hospitalized')
+
+NJ <- ggplot() + 
+  geom_line(data = NJ_test, aes(x = date, y = hospitalizedCumulative), color = "blue") +
+  geom_line(data = NJ_test, aes(x = date, y = prediction), color = "red") +
+  # geom_smooth(data = NJ_test, aes(x = date, y = prediction), method = lm , color="red", fill="#69b3a2", se=TRUE) +
+  scale_x_datetime(date_labels = "%Y-%m", date_breaks  ="1 month") +
+  xlab('Dates') +
+  ylab('Hospitalized')
+
+AZ <- ggplot() + 
+  geom_line(data = AZ_test, aes(x = date, y = hospitalizedCumulative), color = "blue") +
+  geom_line(data = AZ_test, aes(x = date, y = prediction), color = "red") +
+  # geom_smooth(data = AZ_test, aes(x = date, y = prediction), method = lm , color="red", fill="#69b3a2", se=TRUE) +
+  scale_x_datetime(date_labels = "%Y-%m", date_breaks  ="1 month") +
+  xlab('Dates') +
+  ylab('Hospitalized')
+
+Total <- ggarrange(NY, GA, FL, NJ, AZ + rremove("x.text"), 
+          labels = c("NY", "GA", "FL", "NJ", "AZ"),
+          ncol = 2, nrow = 3)
+```
+
+
+
+
+
